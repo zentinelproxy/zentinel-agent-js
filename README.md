@@ -1,331 +1,201 @@
-# zentinel-agent-js
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-JavaScript scripting agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy. Write custom request/response processing logic in JavaScript.
+<h3 align="center">JavaScript agent</h3>
 
-## Features
+<p align="center">Runs one JavaScript file (QuickJS) on request and response headers to allow, block, redirect or rewrite headers.</p>
 
-- Execute JavaScript scripts on request/response lifecycle events
-- Fast, lightweight QuickJS engine (via rquickjs)
-- Console API for logging (console.log, console.warn, console.error)
-- Return-based decision model (allow, block, redirect)
-- Header manipulation (add/remove request and response headers)
-- Fail-open mode for graceful error handling
+<p align="center">
+  <a href="https://github.com/zentinelproxy/zentinel-agent-js/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/zentinelproxy/zentinel-agent-js/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-9b4d8a?style=flat&labelColor=1f161e">
+  <img alt="Rust: 1.94.1+" src="https://img.shields.io/badge/rust-1.94.1%2B-f68d31?style=flat&labelColor=1f161e&logo=rust&logoColor=white">
+  <img alt="Agent protocol: v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&labelColor=1f161e">
+</p>
 
-## Installation
+<p align="center">
+  <a href="https://registry.zentinelproxy.io/js/">Registry</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
 
-### Using Bundle (Recommended)
+For request logic that is too specific for a built-in filter and too small
+for a compiled agent. The agent loads one script at startup and calls its
+`on_request_headers(request)` and `on_response_headers(response)` functions;
+whatever object they return becomes the decision. A function the script does
+not define allows. A script error blocks with `500` unless the agent runs
+with `--fail-open`; if the agent itself is unreachable, the filter's
+`failure-mode` decides.
+
+## Quick start
 
 ```bash
-# Install just this agent
 zentinel bundle install js
 
-# Or install all bundled agents
-zentinel bundle install
+cat > handler.js <<'EOF'
+function on_request_headers(request) {
+    if (request.uri.startsWith("/admin")) {
+        return { decision: "block", status: 403, body: "Forbidden" };
+    }
+    return { decision: "allow", add_request_headers: { "X-Processed-By": "js-agent" } };
+}
+EOF
+
+zentinel-js-agent --script handler.js --grpc-address 127.0.0.1:50052
 ```
 
-The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/) for details.
+The agent speaks gRPC only (no Unix socket), so the proxy connects with `grpc`:
 
-### Using Cargo
+```kdl
+system {
+    worker-threads 0
+}
 
-`zentinel-agent-js` is not published on crates.io, so `cargo install zentinel-agent-js` does not
-work. Install straight from the repository instead:
+listeners {
+    listener "http" {
+        address "127.0.0.1:8080"
+        protocol "http"
+    }
+}
+
+agents {
+    agent "js" type="custom" {
+        grpc "http://127.0.0.1:50052"
+        events "request_headers" "response_headers"
+        timeout-ms 100
+    }
+}
+
+filters {
+    filter "js" {
+        type "agent"
+        agent "js"
+        failure-mode "closed"
+    }
+}
+
+routes {
+    route "default" {
+        matches {
+            path-prefix "/"
+        }
+        upstream "backend"
+        filters "js"
+    }
+}
+
+upstreams {
+    upstream "backend" {
+        target "127.0.0.1:3000"
+    }
+}
+```
+
+## Install
+
+```bash
+zentinel bundle install js
+```
+
+Or from the repository (the crate is not on crates.io):
 
 ```bash
 cargo install --git https://github.com/zentinelproxy/zentinel-agent-js
 ```
 
-This builds and installs the `zentinel-js-agent` binary.
+Release binaries (`zentinel-js-agent-<version>-<platform>.tar.gz`) for
+`linux-x86_64`, `linux-aarch64` and `darwin-aarch64` are on the
+[releases page](https://github.com/zentinelproxy/zentinel-agent-js/releases).
+From source: `cargo build --release`.
 
-### Prebuilt Binaries
+## Configuration
 
-Each [release](https://github.com/zentinelproxy/zentinel-agent-js/releases) ships binaries
-for `linux-x86_64`, `linux-aarch64`, and `darwin-aarch64`:
+| Option | Default | Meaning |
+|---|---|---|
+| `--script` / `JS_SCRIPT` | required | JavaScript file to load at startup |
+| `--grpc-address` / `GRPC_ADDRESS` | `0.0.0.0:50052` | gRPC listen address |
+| `--fail-open` / `FAIL_OPEN` | `false` | On a script error, allow (tags `js-error`, `fail-open`) instead of blocking with `500` |
+| `--verbose`, `-v` / `JS_VERBOSE` | `false` | Debug logging |
 
-```bash
-VERSION=0.3.0
-PLATFORM=linux-x86_64   # or linux-aarch64, darwin-aarch64
-curl -fsSL -o zentinel-js-agent.tar.gz \
-  "https://github.com/zentinelproxy/zentinel-agent-js/releases/download/v${VERSION}/zentinel-js-agent-${VERSION}-${PLATFORM}.tar.gz"
-tar -xzf zentinel-js-agent.tar.gz
-sudo install -m 0755 zentinel-js-agent /usr/local/bin/
-```
+The default listen address is all interfaces; bind it to `127.0.0.1` unless
+the proxy runs on another host. The script is read once; restart the agent to
+change it. The proxy does not forward an agent block's `config { }` to the
+agent, so use the flags above.
 
-### From Source
+### Script API
 
-```bash
-git clone https://github.com/zentinelproxy/zentinel-agent-js
-cd zentinel-agent-js
-cargo build --release
-```
+The `request` argument has `method`, `uri` (path and query), `client_ip`,
+`correlation_id` and `headers`. The `response` argument has `status`,
+`correlation_id` and `headers`. Header names are **lowercase** (`user-agent`,
+not `User-Agent`), repeated headers are joined with `", "`, and the request
+headers include the pseudo-headers `:method` and `:path`.
 
-## Usage
+The returned object:
 
-```bash
-zentinel-js-agent --socket /var/run/zentinel/js.sock \
-  --script /etc/zentinel/scripts/handler.js
-```
+| Field | Meaning |
+|---|---|
+| `decision` | `"allow"` (default), `"block"` / `"deny"`, or `"redirect"` |
+| `status` | Status for block (default `403`) or redirect (default `302`) |
+| `body` | Response body for block; target URL for redirect |
+| `add_request_headers`, `remove_request_headers` | Object of headers to set / array of names to remove upstream |
+| `add_response_headers`, `remove_response_headers` | The same for the response to the client |
+| `tags` | Audit tags |
 
-### Command Line Options
-
-| Option | Environment Variable | Description | Default |
-|--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-js.sock` |
-| `--script` | `JS_SCRIPT` | JavaScript script file | (required) |
-| `--verbose` | `JS_VERBOSE` | Enable debug logging | `false` |
-| `--fail-open` | `FAIL_OPEN` | Allow requests on script errors | `false` |
-
-## Writing Scripts
-
-### Basic Example
+`console.log`, `console.warn` and `console.error` write to the agent's log.
+There is no other host API (no network, no filesystem).
 
 ```javascript
 function on_request_headers(request) {
-    // Block admin access
-    if (request.uri.includes("/admin")) {
-        return { decision: "block", status: 403, body: "Forbidden" };
-    }
-
-    // Allow all other requests
-    return { decision: "allow" };
-}
-```
-
-### Available Hooks
-
-| Hook | Description |
-|------|-------------|
-| `on_request_headers(request)` | Called when request headers are received |
-| `on_response_headers(response)` | Called when response headers are received |
-
-### Request Object
-
-```javascript
-{
-    method: "GET",           // HTTP method
-    uri: "/api/users",       // Request URI with query string
-    client_ip: "192.168.1.1", // Client IP address
-    correlation_id: "abc123", // Request correlation ID
-    headers: {               // Request headers (name -> value)
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0..."
-    }
-}
-```
-
-### Response Object
-
-```javascript
-{
-    status: 200,             // HTTP status code
-    correlation_id: "abc123", // Request correlation ID
-    headers: {               // Response headers (name -> value)
-        "Content-Type": "application/json",
-        "X-Custom": "value"
-    }
-}
-```
-
-### Return Values
-
-Scripts should return a decision object:
-
-```javascript
-// Allow the request
-return { decision: "allow" };
-
-// Block with custom status and body
-return { decision: "block", status: 403, body: "Access Denied" };
-
-// Redirect to another URL
-return { decision: "redirect", status: 302, body: "https://example.com/login" };
-```
-
-### Header Manipulation
-
-```javascript
-function on_request_headers(request) {
-    return {
-        decision: "allow",
-        add_request_headers: {
-            "X-Processed-By": "js-agent",
-            "X-Client-IP": request.client_ip
-        },
-        remove_request_headers: ["X-Debug"],
-        add_response_headers: {
-            "X-Frame-Options": "DENY"
-        }
-    };
-}
-```
-
-### Audit Tags
-
-Add tags for logging and analytics:
-
-```javascript
-function on_request_headers(request) {
-    if (request.headers["User-Agent"]?.includes("bot")) {
-        return {
-            decision: "allow",
-            tags: ["bot-detected", "monitoring"]
-        };
-    }
-    return { decision: "allow" };
-}
-```
-
-### Console Logging
-
-```javascript
-function on_request_headers(request) {
-    console.log("Processing request:", request.uri);
-    console.warn("Warning message");
-    console.error("Error message");
-    return { decision: "allow" };
-}
-```
-
-## Examples
-
-### Block Bad User-Agents
-
-```javascript
-function on_request_headers(request) {
-    const ua = request.headers["User-Agent"] || "";
-    const badBots = ["sqlmap", "nikto", "nessus", "masscan"];
-
-    for (const bot of badBots) {
-        if (ua.toLowerCase().includes(bot)) {
-            return {
-                decision: "block",
-                status: 403,
-                tags: ["bot-blocked", bot]
-            };
+    const ua = (request.headers["user-agent"] || "").toLowerCase();
+    for (const bot of ["sqlmap", "nikto", "masscan"]) {
+        if (ua.includes(bot)) {
+            return { decision: "block", status: 403, tags: ["bot-blocked", bot] };
         }
     }
+    if (!request.uri.startsWith("/public/") && !request.headers["authorization"]) {
+        return { decision: "block", status: 401, body: "Authentication required" };
+    }
     return { decision: "allow" };
 }
-```
 
-### Rate Limit by Path
-
-```javascript
-function on_request_headers(request) {
-    // Add rate limit tier based on path
-    let tier = "standard";
-    if (request.uri.startsWith("/api/v1/")) {
-        tier = "api";
-    } else if (request.uri.startsWith("/admin/")) {
-        tier = "admin";
-    }
-
-    return {
-        decision: "allow",
-        add_request_headers: {
-            "X-Rate-Limit-Tier": tier
-        }
-    };
-}
-```
-
-### Require Authentication
-
-```javascript
-function on_request_headers(request) {
-    // Skip for public paths
-    if (request.uri.startsWith("/public/") || request.uri === "/health") {
-        return { decision: "allow" };
-    }
-
-    // Check for auth header
-    if (!request.headers["Authorization"]) {
-        return {
-            decision: "block",
-            status: 401,
-            body: "Authentication required"
-        };
-    }
-
-    return { decision: "allow" };
-}
-```
-
-### Add Security Headers
-
-```javascript
 function on_response_headers(response) {
     return {
         decision: "allow",
-        add_response_headers: {
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "X-XSS-Protection": "1; mode=block",
-            "Strict-Transport-Security": "max-age=31536000"
-        }
+        add_response_headers: { "X-Content-Type-Options": "nosniff" }
     };
 }
 ```
 
-## Zentinel Proxy Configuration
-
-```kdl
-agents {
-    agent "js" {
-        type "custom"
-        transport "unix_socket" {
-            path "/var/run/zentinel/js.sock"
-        }
-        events "request_headers" "response_headers"
-        timeout-ms 100
-        failure-mode "open"
-    }
-}
-```
-
-## Error Handling
-
-When `--fail-open` is enabled, script errors will:
-- Log the error
-- Allow the request to proceed
-- Add `js-error` and `fail-open` tags to audit metadata
-
-When `--fail-open` is disabled (default), script errors will:
-- Log the error
-- Block the request with 500 status
-- Add `js-error` tag to audit metadata
-
-## Comparison with zentinel-agent-lua
-
-| Feature | zentinel-agent-js | zentinel-agent-lua |
-|---------|------------------|-------------------|
-| Engine | QuickJS | mlua (Lua 5.4) |
-| Scripting | Single script file | Multiple scripts with metadata |
-| Hot Reload | No | Yes |
-| VM Pooling | No | Yes |
-| Resource Limits | Minimal | Comprehensive (memory, CPU, time) |
-| Standard Library | Basic (console) | Rich (JSON, crypto, regex, etc.) |
-| Use Case | Simple scripts | Production workloads |
-
-Use `zentinel-agent-js` for:
-- Simple request filtering logic
-- Quick prototyping
-- Lightweight deployments
-
-Use `zentinel-agent-lua` for:
-- Complex processing logic
-- Production environments with strict resource limits
-- Multiple scripts with hot reload
+Unreleased on `main` (not in release 0.3.0): `on_request_body_chunk`,
+`on_response_body_chunk` and `on_websocket_frame` hooks, a cached script
+context, and a 64 MiB QuickJS memory limit.
 
 ## Development
 
 ```bash
-# Run with debug logging
-RUST_LOG=debug cargo run -- --socket /tmp/test.sock --script ./test.js --verbose
-
-# Run tests
 cargo test
+cargo clippy --all-targets -- -D warnings
 ```
+
+## Related
+
+- [Registry page](https://registry.zentinelproxy.io/js/)
+- [Agent configuration](https://docs.zentinelproxy.io/configuration/agents/)
+- [Agent protocol v2](https://docs.zentinelproxy.io/agents/v2/)
+- [Lua agent](https://github.com/zentinelproxy/zentinel-agent-lua), the same model in Lua
+- [Zentinel](https://github.com/zentinelproxy/zentinel)
 
 ## License
 
-Apache-2.0
+Apache-2.0, see [`LICENSE`](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>
