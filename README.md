@@ -46,10 +46,8 @@ function on_request_headers(request) {
 }
 EOF
 
-zentinel-js-agent --script handler.js --grpc-address 127.0.0.1:50052
+zentinel-js-agent --script handler.js --socket /tmp/zentinel-js.sock
 ```
-
-The agent speaks gRPC only (no Unix socket), so the proxy connects with `grpc`:
 
 ```kdl
 system {
@@ -65,7 +63,7 @@ listeners {
 
 agents {
     agent "js" type="custom" {
-        grpc "http://127.0.0.1:50052"
+        unix-socket "/tmp/zentinel-js.sock"
         events "request_headers" "response_headers"
         timeout-ms 100
     }
@@ -118,12 +116,13 @@ From source: `cargo build --release`.
 | Option | Default | Meaning |
 |---|---|---|
 | `--script` / `JS_SCRIPT` | required | JavaScript file to load at startup |
-| `--grpc-address` / `GRPC_ADDRESS` | `0.0.0.0:50052` | gRPC listen address |
+| `--socket` / `AGENT_SOCKET` | `/tmp/zentinel-js.sock` | Unix socket to serve agent protocol v2 on |
+| `--grpc-address` / `GRPC_ADDRESS` | unset | Serve gRPC on this address (e.g. `127.0.0.1:50052`) instead of the Unix socket; the proxy then connects with `grpc "http://..."` |
 | `--fail-open` / `FAIL_OPEN` | `false` | On a script error, allow (tags `js-error`, `fail-open`) instead of blocking with `500` |
 | `--verbose`, `-v` / `JS_VERBOSE` | `false` | Debug logging |
 
-The default listen address is all interfaces; bind it to `127.0.0.1` unless
-the proxy runs on another host. The script is read once; restart the agent to
+Up to 0.3.0 the agent served gRPC only, on `0.0.0.0:50052` by default; it
+now serves the Unix socket unless `--grpc-address` is given. The script is read once; restart the agent to
 change it. The proxy does not forward an agent block's `config { }` to the
 agent, so use the flags above.
 
@@ -171,15 +170,28 @@ function on_response_headers(response) {
 }
 ```
 
-Unreleased on `main` (not in release 0.3.0): `on_request_body_chunk`,
-`on_response_body_chunk` and `on_websocket_frame` hooks, a cached script
-context, and a 64 MiB QuickJS memory limit.
+New since release 0.3.0 (whose binary was built from 0.2.0 code):
+`on_request_body_chunk`, `on_response_body_chunk` and `on_websocket_frame`
+hooks, a cached script context, a 64 MiB QuickJS memory limit, and the Unix
+socket transport.
 
 ## Development
 
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
+```
+
+`scripts/smoke-test.sh` runs the release binary behind a real Zentinel with
+the shared harness (`agent-smoke/smoke.py` from
+[zentinelproxy/.github](https://github.com/zentinelproxy/.github)), loading
+`scripts/smoke/block-admin.js`: `/admin` and paths under it get `403`, other
+paths are forwarded with the header the script adds, and stopping the agent
+changes the answer. CI runs it on every push; a release runs it on every
+platform before anything is published.
+
+```bash
+AGENT_SMOKE=../.github/agent-smoke/smoke.py scripts/smoke-test.sh target/release/zentinel-js-agent ./zentinel
 ```
 
 ## Related
