@@ -2,7 +2,8 @@
 //!
 //! Command-line interface for the JavaScript scripting agent.
 //!
-//! Supports both UDS (Unix Domain Socket) and gRPC transports for v2 protocol.
+//! Serves agent protocol v2 over a Unix socket (`--socket`, the default) or
+//! gRPC (`--grpc-address`).
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 use zentinel_agent_js::JsAgent;
-use zentinel_agent_protocol::v2::GrpcAgentServerV2;
+use zentinel_agent_protocol::v2::{GrpcAgentServerV2, UdsAgentServerV2};
 
 /// Command line arguments
 #[derive(Parser, Debug)]
@@ -22,8 +23,13 @@ struct Args {
     #[arg(long, env = "JS_SCRIPT")]
     script: PathBuf,
 
-    /// gRPC address to listen on (e.g., "0.0.0.0:50052").
-    /// If not specified, defaults to "0.0.0.0:50052".
+    /// Unix socket to listen on (agent protocol v2 over UDS). Used unless
+    /// `--grpc-address` is given.
+    #[arg(long, default_value = "/tmp/zentinel-js.sock", env = "AGENT_SOCKET")]
+    socket: PathBuf,
+
+    /// gRPC address to listen on (e.g. "127.0.0.1:50052"). When given, the
+    /// agent serves agent protocol v2 over gRPC instead of the Unix socket.
     #[arg(long, env = "GRPC_ADDRESS")]
     grpc_address: Option<String>,
 
@@ -63,28 +69,46 @@ async fn main() -> Result<()> {
         "Agent configured"
     );
 
-    // Determine gRPC address
-    let grpc_addr = args
-        .grpc_address
-        .unwrap_or_else(|| "0.0.0.0:50052".to_string());
-
-    info!(
-        grpc_address = %grpc_addr,
-        "Starting gRPC v2 agent server"
-    );
-
-    let addr = grpc_addr
-        .parse()
-        .context("Invalid gRPC address format (expected host:port)")?;
-
-    let server = GrpcAgentServerV2::new("zentinel-js-agent", Box::new(agent));
-
-    info!("JavaScript agent ready and listening on gRPC");
-
-    server
-        .run(addr)
-        .await
-        .context("Failed to run JavaScript agent gRPC server")?;
+    if let Some(grpc_addr) = args.grpc_address {
+        let addr = grpc_addr
+            .parse()
+            .context("Invalid gRPC address format (expected host:port)")?;
+        info!(grpc_address = %grpc_addr, "Listening on gRPC (agent protocol v2)");
+        GrpcAgentServerV2::new("zentinel-js-agent", Box::new(agent))
+            .run(addr)
+            .await
+            .context("Failed to run JavaScript agent gRPC server")?;
+    } else {
+        info!(socket = %args.socket.display(), "Listening on Unix socket (agent protocol v2)");
+        UdsAgentServerV2::new("zentinel-js-agent", args.socket, Box::new(agent))
+            .run()
+            .await
+            .context("Failed to run JavaScript agent UDS server")?;
+    }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_names_the_binary() {
+        let err = Args::try_parse_from(["x", "--version"]).unwrap_err();
+        assert_eq!(
+            err.to_string().trim(),
+            format!("zentinel-js-agent {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn defaults_to_the_unix_socket() {
+        let args = Args::try_parse_from(["x", "--script", "a.js"]).unwrap();
+        assert!(args.grpc_address.is_none());
+        assert_eq!(args.socket, PathBuf::from("/tmp/zentinel-js.sock"));
+        let args = Args::try_parse_from(["x", "--script", "a.js", "--grpc-address", "127.0.0.1:1"])
+            .unwrap();
+        assert_eq!(args.grpc_address.as_deref(), Some("127.0.0.1:1"));
+    }
 }
