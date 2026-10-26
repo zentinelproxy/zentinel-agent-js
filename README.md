@@ -123,8 +123,15 @@ From source: `cargo build --release`.
 
 Up to 0.3.0 the agent served gRPC only, on `0.0.0.0:50052` by default; it
 now serves the Unix socket unless `--grpc-address` is given. The script is read once; restart the agent to
-change it. The proxy does not forward an agent block's `config { }` to the
-agent, so use the flags above.
+change it. Zentinel 26.10_8 and later send the agent block's `config { }` to
+the agent on every connection (releases up to 0.6.50 never did; over gRPC only
+a build against `zentinel-agent-protocol` 0.6.51 or later receives it, which
+the lockfile's 0.6.50 is not). The agent applies it: `script` (inline
+JavaScript, replacing the file's), `fail-open` and `max-memory` (bytes). A
+block that leaves out `fail-open` sets it to `false`, whatever `--fail-open`
+says. A block the agent cannot parse, or whose script fails to load, is
+refused; Zentinel then does not use the agent and its filters' `failure-mode`
+applies. Without a `config { }` block the flags above are all there is.
 
 ### Script API
 
